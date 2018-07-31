@@ -6,6 +6,7 @@ import (
 	"go/build"
 	"go/parser"
 	"go/token"
+	"io"
 	"io/ioutil"
 	"path"
 	"regexp"
@@ -14,7 +15,7 @@ import (
 	"github.com/pkg/errors"
 )
 
-func Run() error {
+func Run(pkgPaths []string, verbose bool, w io.Writer) error {
 	for _, pkgPath := range pkgPaths {
 		loadedPkg, _ := build.ImportDir(pkgPath, 0)
 
@@ -26,62 +27,71 @@ func Run() error {
 
 		for _, currGoFileName := range goFilesForPkg {
 			currFile := path.Join(pkgPath, currGoFileName)
-			if err := checkFile(currFile); err != nil {
+			failedChecks, err := checkFile(currFile)
+			if err != nil {
 				return errors.Wrapf(err, "file %v failed k8s importalias check", currFile)
+			}
+			for _, failedCheck := range failedChecks {
+				fmt.Fprintf(w, failedCheck.message)
+			}
+			if len(failedChecks) > 0 {
+				return fmt.Errorf("")
 			}
 		}
 	}
+	return nil
 }
 
-func checkFile(filename string) {
+func checkFile(filename string) ([]failedCheck, error) {
 	src, err := ioutil.ReadFile(filename)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, filename, src, parser.ParseComments)
 	if err != nil {
-		return fmt.Errorf("failed to parse file %s: %v", filename, err)
+		return nil, fmt.Errorf("failed to parse file %s: %v", filename, err)
 	}
 
-	hasError = false
+	var visitor visitFn
+	var failedChecks []failedCheck
 	visitor = visitFn(func(node ast.Node) ast.Visitor {
 		if node == nil {
 			return visitor
 		}
 		switch v := node.(type) {
 		case *ast.ImportSpec:
-			err := checkImportAlias(filename, v.Name, v.Path, fset.Position(v.Pos()))
-			if err != nil {
-				hasError = true
+			failedCheck := checkImportAlias(filename, v.Name, v.Path.Value, fset.Position(v.Pos()))
+			if failedCheck != nil {
+				failedChecks = append(failedChecks, *failedCheck)
 			}
 			break
 		}
 		return visitor
 	})
 	ast.Walk(visitor, file)
-	if hasError {
-		return fmt.Errorf("")
-	}
-	return nil
+	return failedChecks, nil
 }
 
-func checkImportAlias(filename string, fset *token.FileSet, alias *ast.Ident, path *ast.BasicLit, pos token.Position) error {
+func checkImportAlias(filename string, alias *ast.Ident, path string, pos token.Position) *failedCheck {
 	for _, aliasDeriver := range aliasDerivers {
 		expected := aliasDeriver.Alias(path)
-		if expected != nil {
+		if expected != "" {
 			if alias == nil {
-				fmt.Fprintf("%s:%d:%d: %q must declare import alias %q", filename, pos.Line, pos.Column, path, expected)
-				return fmt.Errorf("")
+				return &failedCheck{fmt.Sprintf("%s:%d:%d: %q must declare import alias %q", filename, pos.Line, pos.Column, path, expected)}
 			}
-			if expected != alias.Name.Name {
-				fmt.Fprintf("%s:%d:%d: expected %q to declare import alias %q but was %q", filename, pos.Line, pos.Column, path, expected, alias.Name)
-				return fmt.Errorf("")
+			if expected != alias.Name {
+				return &failedCheck{fmt.Sprintf("%s:%d:%d: expected %q to declare import alias %q but was %q", filename, pos.Line, pos.Column, path, expected, alias.Name)}
 			}
 			return nil
 		}
 	}
+	return nil
+}
+
+type failedCheck struct {
+	message string
 }
 
 type visitFn func(node ast.Node) ast.Visitor
@@ -114,7 +124,7 @@ func k8sioApiAlias(filename string) string {
 var k8sioApimachineryRegex = regexp.MustCompile(`k8s\.io\/apimachinery\/pkg\/apis\/meta\/v.*`)
 
 func k8sioApimachineryAlias(filename string) string {
-	bool := k8sioApimachineryRegex.MatchString(filename)
+	match := k8sioApimachineryRegex.MatchString(filename)
 	if match {
 		return "meta"
 	}
