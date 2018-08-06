@@ -25,6 +25,7 @@ func Run(pkgPaths []string, verbose bool, w io.Writer) error {
 		goFilesForPkg = append(goFilesForPkg, loadedPkg.XTestGoFiles...)
 		sort.Strings(goFilesForPkg)
 
+		hasError := false
 		for _, currGoFileName := range goFilesForPkg {
 			currFile := path.Join(pkgPath, currGoFileName)
 			failedChecks, err := checkFile(currFile)
@@ -32,11 +33,14 @@ func Run(pkgPaths []string, verbose bool, w io.Writer) error {
 				return errors.Wrapf(err, "file %v failed k8s importalias check", currFile)
 			}
 			for _, failedCheck := range failedChecks {
-				fmt.Fprintf(w, failedCheck.message)
+				fmt.Fprintln(w, failedCheck.message)
 			}
 			if len(failedChecks) > 0 {
-				return fmt.Errorf("")
+				hasError = true
 			}
+		}
+		if hasError {
+			return fmt.Errorf("")
 		}
 	}
 	return nil
@@ -79,10 +83,10 @@ func checkImportAlias(filename string, alias *ast.Ident, path string, pos token.
 		expected := aliasDeriver.Alias(path)
 		if expected != "" {
 			if alias == nil {
-				return &failedCheck{fmt.Sprintf("%s:%d:%d: %q must declare import alias %q", filename, pos.Line, pos.Column, path, expected)}
+				return &failedCheck{fmt.Sprintf("%s:%d:%d: %s must declare import alias %q", filename, pos.Line, pos.Column, path, expected)}
 			}
 			if expected != alias.Name {
-				return &failedCheck{fmt.Sprintf("%s:%d:%d: expected %q to declare import alias %q but was %q", filename, pos.Line, pos.Column, path, expected, alias.Name)}
+				return &failedCheck{fmt.Sprintf("%s:%d:%d: expected %s to declare import alias %q but was %q", filename, pos.Line, pos.Column, path, expected, alias.Name)}
 			}
 			return nil
 		}
